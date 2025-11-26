@@ -1,10 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using Newtonsoft.Json;
 using UnityEngine;
+using Color = System.Drawing.Color;
+using Graphics = System.Drawing.Graphics;
 
 namespace Terry.MagicDuel
 {
@@ -13,142 +16,174 @@ namespace Terry.MagicDuel
         private static ImageShapeSimilarity _instance;
         public static ImageShapeSimilarity Instance => _instance ?? (_instance = new ImageShapeSimilarity());
 
-        Dictionary<SkillType, List<List<Vector2>>> skillList = new Dictionary<SkillType, List<List<Vector2>>>();
-
+        Dictionary<SkillType, List<List<PointF>>> skillList = new Dictionary<SkillType, List<List<PointF>>>();
+        private int bitmapSize = 256; // 栅格化分辨率，可调
+         /// <summary>
+        /// 初始化标准路径
+        /// </summary>
         public void Init()
         {
-            string folderPath = @"Assets\Resources\standard"; // 文件夹路径
+            string folderPath = @"Assets\Resources\standard";
             string[] files = Directory.GetFiles(folderPath, "*.txt", SearchOption.AllDirectories);
+
             foreach (var file in files)
             {
                 string fileName = Path.GetFileName(file);
                 fileName = fileName.Substring(0, fileName.LastIndexOf('.'));
                 if (Enum.TryParse<SkillType>(fileName, out SkillType skillType))
                 {
-                    Debug.Log("========fileName==========" + fileName);
-                    List<List<Vector2>> loadPointsFromJson = LoadPointsFromJson(file);
+                    Debug.Log("加载标准技能路径：" + fileName);
+                    List<List<PointF>> loadPointsFromJson = LoadPointsFromJson(file);
                     skillList.Add(skillType, loadPointsFromJson);
                 }
             }
         }
 
-        // 对比用户输入路径与标准路径的相似度，返回 0~1
-        public double Compare(List<List<Vector2>> target)
+         
+        public double Compare(List<List<PointF>> target)
         {
             double maxSimilarity = 0;
 
             foreach (var key in skillList.Keys)
             {
-                double similarity = CompareSkill(target, skillList[key]);
-                Debug.Log($"====技能======={key}=======相似度======{similarity:F3}");
-                if (similarity > maxSimilarity)
-                    maxSimilarity = similarity;
+                double similarity = CompareShape(target, skillList[key]);
+                Debug.Log($"技能 {key} 相似度: {similarity:F3}");
+                if (similarity > maxSimilarity) maxSimilarity = similarity;
             }
 
             return maxSimilarity;
         }
+        #region 核心算法（Bitmap + IoU）
 
-        // 多条笔画路径对比，忽略水平和垂直翻转
-        private double CompareSkill(List<List<Vector2>> pathA, List<List<Vector2>> pathB)
+        private double CompareShape(List<List<PointF>> pathA, List<List<PointF>> pathB)
         {
-            List<double> distances = new List<double>();
+            using var bmpB = DrawBitmap(pathB,"standard");
+            using var bmpA = DrawBitmap(pathA,"current");
 
-            foreach (var strokeA in pathA)
+            // 四翻转版本
+            var variants = new List<Bitmap>()
             {
-                double minDistance = double.MaxValue;
-                var normA = NormalizePath(strokeA);
+                bmpA,
+                FlipBitmap(bmpA, true, false),  // 水平翻转
+                FlipBitmap(bmpA, false, true),  // 垂直翻转
+                FlipBitmap(bmpA, true, true)    // 180度翻转
+            };
 
-                // 生成 4 种翻转路径
-                var flippedH = normA.Select(p => new Vector2(1f - p.x, p.y)).ToList();            // 左右翻转
-                var flippedV = normA.Select(p => new Vector2(p.x, 1f - p.y)).ToList();            // 上下翻转
-                var flippedHV = normA.Select(p => new Vector2(1f - p.x, 1f - p.y)).ToList();      // 左右+上下翻转
-
-                foreach (var strokeB in pathB)
-                {
-                    var normB = NormalizePath(strokeB);
-
-                    double d1 = DTWDistance(normA, normB);
-                    double d2 = DTWDistance(flippedH, normB);
-                    double d3 = DTWDistance(flippedV, normB);
-                    double d4 = DTWDistance(flippedHV, normB);
-
-                    double d = Math.Min(Math.Min(d1, d2), Math.Min(d3, d4));
-
-                    if (d < minDistance) minDistance = d;
-                }
-                distances.Add(minDistance);
+            double maxSimilarity = 0;
+            foreach (var variant in variants)
+            {
+                double sim = IoUSimilarity(variant, bmpB);
+                if (sim > maxSimilarity) maxSimilarity = sim;
             }
 
-            double avgDistance = distances.Average();
-            double similarity = Math.Exp(-avgDistance * 5); // 调整指数可控敏感度
-            return Math.Max(0, Math.Min(1, similarity));
+            return maxSimilarity;
         }
-
-        // DTW 算法
-        private double DTWDistance(List<Vector2> path1, List<Vector2> path2)
+        private Bitmap DrawBitmap(List<List<PointF>> strokes, string name)
         {
-            int n = path1.Count;
-            int m = path2.Count;
-            double[,] dtw = new double[n + 1, m + 1];
+            var bmp = new Bitmap(bitmapSize, bitmapSize);
+            using var g = Graphics.FromImage(bmp);
+            g.Clear(Color.Black);
 
-            for (int i = 0; i <= n; i++)
-                for (int j = 0; j <= m; j++)
-                    dtw[i, j] = double.PositiveInfinity;
-            dtw[0, 0] = 0;
+            // 合并所有点，归一化到 [0,1]
+            var allPoints = strokes.SelectMany(s => s).ToList();
+            float minX = allPoints.Min(p => p.X);
+            float maxX = allPoints.Max(p => p.X);
+            float minY = allPoints.Min(p => p.Y);
+            float maxY = allPoints.Max(p => p.Y);
 
-            for (int i = 1; i <= n; i++)
+            float width = maxX - minX + 1e-3f;
+            float height = maxY - minY + 1e-3f;
+
+            foreach (var stroke in strokes)
             {
-                for (int j = 1; j <= m; j++)
+                if (stroke.Count < 2) continue;
+                using var pen = new Pen(Color.White, 4); // 画粗一些
+                for (int i = 1; i < stroke.Count; i++)
                 {
-                    double cost = Vector2.Distance(path1[i - 1], path2[j - 1]);
-                    dtw[i, j] = cost + Math.Min(Math.Min(dtw[i - 1, j], dtw[i, j - 1]), dtw[i - 1, j - 1]);
+                    var p1 = new PointF((stroke[i - 1].X - minX) / width * bitmapSize,
+                        (stroke[i - 1].Y - minY) / height * bitmapSize);
+                    var p2 = new PointF((stroke[i].X - minX) / width * bitmapSize,
+                        (stroke[i].Y - minY) / height * bitmapSize);
+                    g.DrawLine(pen, p1, p2);
                 }
             }
-            return dtw[n, m] / (n + m); // 平均距离
-        }
 
-        // 坐标归一化到 0~1
-        private List<Vector2> NormalizePath(List<Vector2> path)
+            string folderPath = @"Assets\Resources\standard";
+            bmp.Save(Path.Combine(folderPath, name + ".png"), ImageFormat.Png);
+            return bmp;
+        }
+        private Bitmap FlipBitmap(Bitmap bmp, bool horizontal, bool vertical)
         {
-            if (path.Count == 0) return path;
-            float minX = path.Min(p => p.x);
-            float maxX = path.Max(p => p.x);
-            float minY = path.Min(p => p.y);
-            float maxY = path.Max(p => p.y);
-
-            float width = maxX - minX;
-            float height = maxY - minY;
-
-            List<Vector2> norm = new List<Vector2>();
-            foreach (var p in path)
-            {
-                float x = width > 0 ? (p.x - minX) / width : 0.5f;
-                float y = height > 0 ? (p.y - minY) / height : 0.5f;
-                norm.Add(new Vector2(x, y));
-            }
-            return norm;
+            var flipped = (Bitmap)bmp.Clone();
+            if (horizontal && vertical)
+                flipped.RotateFlip(RotateFlipType.Rotate180FlipNone);
+            else if (horizontal)
+                flipped.RotateFlip(RotateFlipType.RotateNoneFlipX);
+            else if (vertical)
+                flipped.RotateFlip(RotateFlipType.RotateNoneFlipY);
+            return flipped;
         }
 
-        // 从 JSON 加载坐标
-        List<List<Vector2>> LoadPointsFromJson(string jsonPath)
+        private double IoUSimilarity(Bitmap bmp1, Bitmap bmp2)
+        {
+            if (bmp1.Width != bmp2.Width || bmp1.Height != bmp2.Height)
+                throw new ArgumentException("Bitmap大小不一致");
+
+            int intersection = 0, union = 0;
+
+            var data1 = bmp1.LockBits(new Rectangle(0, 0, bmp1.Width, bmp1.Height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+            var data2 = bmp2.LockBits(new Rectangle(0, 0, bmp2.Width, bmp2.Height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+
+            unsafe
+            {
+                byte* ptr1 = (byte*)data1.Scan0;
+                byte* ptr2 = (byte*)data2.Scan0;
+                int stride1 = data1.Stride;
+                int stride2 = data2.Stride;
+
+                for (int y = 0; y < bmp1.Height; y++)
+                {
+                    for (int x = 0; x < bmp1.Width; x++)
+                    {
+                        bool b1 = ptr1[y * stride1 + x * 3] > 127;
+                        bool b2 = ptr2[y * stride2 + x * 3] > 127;
+                        if (b1 || b2) union++;
+                        if (b1 && b2) intersection++;
+                    }
+                }
+            }
+
+            bmp1.UnlockBits(data1);
+            bmp2.UnlockBits(data2);
+
+            return union == 0 ? 0 : (double)intersection / union;
+        }
+
+        #endregion
+      
+        #region JSON加载
+
+        private List<List<PointF>> LoadPointsFromJson(string jsonPath)
         {
             var json = File.ReadAllText(jsonPath);
             var data = JsonConvert.DeserializeObject<List<List<Dictionary<string, double>>>>(json);
             return data.Select(
-                group => group.Select(p => new Vector2((float)p["x"], (float)p["y"])).ToList()
+                group => group.Select(p => new PointF((float)p["x"], (float)p["y"])).ToList()
             ).ToList();
         }
+
+        #endregion
         
         public void drawStandardPic(SkillType skillType)
         {
-            List<List<Vector2>> skill = skillList[skillType];
+            List<List<PointF>> skill = skillList[skillType];
           
             for (int i = 0; i < skill.Count; i++)
             {
                 DrawMananger.Instance.StartPaint();
                 for (int j = 0; j < skill[i].Count; j++)
                 {
-                    DrawMananger.Instance.Paintting(new Vector3((skill[i][j].x-1f)*1.2f, skill[i][j].x*1.2f));
+                    DrawMananger.Instance.Paintting(new Vector3((skill[i][j].X-1f)*1.2f, skill[i][j].Y*1.2f));
                 }
                 DrawMananger.Instance.EndPaint();
             }
