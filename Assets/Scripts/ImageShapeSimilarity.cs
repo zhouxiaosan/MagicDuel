@@ -57,10 +57,10 @@ namespace Terry.MagicDuel
 
         private double CompareShape(List<List<PointF>> pathA, List<List<PointF>> pathB)
         {
-            using var bmpB = DrawBitmap(pathB,"standard");
-            using var bmpA = DrawBitmap(pathA,"current");
+            using var bmpB = DrawBitmap(pathB, "standard");
+            using var bmpA = DrawBitmap(pathA, "current");
 
-            // 四翻转版本
+            // 四翻转 + 小角度旋转
             var variants = new List<Bitmap>()
             {
                 bmpA,
@@ -69,11 +69,20 @@ namespace Terry.MagicDuel
                 FlipBitmap(bmpA, true, true)    // 180度翻转
             };
 
+            var rotatedVariants = new List<Bitmap>();
+            foreach (var v in variants)
+            {
+                rotatedVariants.Add(v);
+                rotatedVariants.Add(RotateBitmap(v, 15));
+                rotatedVariants.Add(RotateBitmap(v, -15));
+            }
+
             double maxSimilarity = 0;
-            foreach (var variant in variants)
+            foreach (var variant in rotatedVariants)
             {
                 double sim = IoUSimilarity(variant, bmpB);
                 if (sim > maxSimilarity) maxSimilarity = sim;
+                variant.Dispose(); // 释放旋转产生的 Bitmap
             }
 
             return maxSimilarity;
@@ -84,7 +93,6 @@ namespace Terry.MagicDuel
             using var g = Graphics.FromImage(bmp);
             g.Clear(Color.Black);
 
-            // 合并所有点，归一化到 [0,1]
             var allPoints = strokes.SelectMany(s => s).ToList();
             float minX = allPoints.Min(p => p.X);
             float maxX = allPoints.Max(p => p.X);
@@ -94,10 +102,10 @@ namespace Terry.MagicDuel
             float width = maxX - minX + 1e-3f;
             float height = maxY - minY + 1e-3f;
 
+            using var pen = new Pen(Color.White, 4); // 粗线条
             foreach (var stroke in strokes)
             {
                 if (stroke.Count < 2) continue;
-                using var pen = new Pen(Color.White, 4); // 画粗一些
                 for (int i = 1; i < stroke.Count; i++)
                 {
                     var p1 = new PointF((stroke[i - 1].X - minX) / width * bitmapSize,
@@ -112,6 +120,19 @@ namespace Terry.MagicDuel
             bmp.Save(Path.Combine(folderPath, name + ".png"), ImageFormat.Png);
             return bmp;
         }
+        
+        private Bitmap RotateBitmap(Bitmap bmp, float angle)
+        {
+            var rotated = new Bitmap(bmp.Width, bmp.Height);
+            using var g = Graphics.FromImage(rotated);
+            g.Clear(Color.Black);
+            g.TranslateTransform(bmp.Width / 2f, bmp.Height / 2f);
+            g.RotateTransform(angle);
+            g.TranslateTransform(-bmp.Width / 2f, -bmp.Height / 2f);
+            g.DrawImage(bmp, 0, 0);
+            return rotated;
+        }
+        
         private Bitmap FlipBitmap(Bitmap bmp, bool horizontal, bool vertical)
         {
             var flipped = (Bitmap)bmp.Clone();
@@ -131,8 +152,10 @@ namespace Terry.MagicDuel
 
             int intersection = 0, union = 0;
 
-            var data1 = bmp1.LockBits(new Rectangle(0, 0, bmp1.Width, bmp1.Height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-            var data2 = bmp2.LockBits(new Rectangle(0, 0, bmp2.Width, bmp2.Height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+            var data1 = bmp1.LockBits(new Rectangle(0, 0, bmp1.Width, bmp1.Height),
+                ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+            var data2 = bmp2.LockBits(new Rectangle(0, 0, bmp2.Width, bmp2.Height),
+                ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
 
             unsafe
             {
