@@ -46,13 +46,177 @@ namespace Terry.MagicDuel
 
             foreach (var key in skillList.Keys)
             {
-                double similarity = CompareShape(target, skillList[key]);
+                double similarity = ComparePaths(target, skillList[key]) * 10 ;
+                
+                similarity = similarity > 1 ? 1 : similarity;
+                
                 Debug.Log($"技能 {key} 相似度: {similarity:F3}");
                 if (similarity > maxSimilarity) maxSimilarity = similarity;
             }
 
             return maxSimilarity;
         }
+        
+        
+        /// <summary>
+        /// 将 stroke 合并并插值到固定点数
+        /// </summary>
+        private List<PointF> FlattenAndResample(List<List<PointF>> strokes, int targetPoints = 100)
+        {
+            var allPoints = strokes.SelectMany(NormalizePath).ToList();
+            if (allPoints.Count < 2) return allPoints;
+
+            var resampled = new List<PointF> { allPoints[0] };
+            double totalLength = 0;
+            for (int i = 1; i < allPoints.Count; i++)
+            {
+                totalLength += Distance(allPoints[i - 1], allPoints[i]);
+            }
+            double segmentLength = totalLength / (targetPoints - 1);
+            double accumulated = 0;
+
+            for (int i = 1; i < allPoints.Count; i++)
+            {
+                PointF p1 = allPoints[i - 1];
+                PointF p2 = allPoints[i];
+                double d = Distance(p1, p2);
+                while (accumulated + d >= segmentLength)
+                {
+                    double t = (segmentLength - accumulated) / d;
+                    float x = (float)(p1.X + t * (p2.X - p1.X));
+                    float y = (float)(p1.Y + t * (p2.Y - p1.Y));
+                    resampled.Add(new PointF(x, y));
+                    p1 = new PointF(x, y);
+                    d = Distance(p1, p2);
+                    accumulated = 0;
+                }
+                accumulated += d;
+            }
+            while (resampled.Count < targetPoints) resampled.Add(allPoints.Last());
+            return resampled;
+        }
+        
+        /// <summary>
+        /// 归一化到 [0,1] 范围
+        /// </summary>
+        private List<PointF> NormalizePath(List<PointF> path)
+        {
+            if (path.Count == 0) return path;
+            float minX = path.Min(p => p.X);
+            float maxX = path.Max(p => p.X);
+            float minY = path.Min(p => p.Y);
+            float maxY = path.Max(p => p.Y);
+            float width = maxX - minX;
+            float height = maxY - minY;
+            float scale = Math.Max(width, height);
+            return path.Select(p => new PointF(
+                (p.X - minX) / scale,
+                (p.Y - minY) / scale
+            )).ToList();
+        }
+
+        private double Distance(PointF p1, PointF p2)
+        {
+            float dx = p1.X - p2.X;
+            float dy = p1.Y - p2.Y;
+            return Math.Sqrt(dx * dx + dy * dy);
+        }
+
+        /// <summary>
+        /// 旋转路径
+        /// </summary>
+        private List<PointF> RotatePath(List<PointF> path, float angleDegrees)
+        {
+            double angle = angleDegrees * Math.PI / 180.0;
+            var center = new PointF(path.Average(p => p.X), path.Average(p => p.Y));
+            return path.Select(p =>
+            {
+                float dx = p.X - center.X;
+                float dy = p.Y - center.Y;
+                float xNew = (float)(dx * Math.Cos(angle) - dy * Math.Sin(angle)) + center.X;
+                float yNew = (float)(dx * Math.Sin(angle) + dy * Math.Cos(angle)) + center.Y;
+                return new PointF(xNew, yNew);
+            }).ToList();
+        }
+        
+        /// <summary>
+        /// Hausdorff 距离
+        /// </summary>
+        private double HausdorffDistance(List<PointF> pathA, List<PointF> pathB)
+        {
+            double maxDistAB = pathA.Max(a => pathB.Min(b => Distance(a, b)));
+            double maxDistBA = pathB.Max(b => pathA.Min(a => Distance(a, b)));
+            return Math.Max(maxDistAB, maxDistBA);
+        }
+
+        /// <summary>
+        /// DTW 距离
+        /// </summary>
+        private double DTWDistance(List<PointF> pathA, List<PointF> pathB)
+        {
+            int n = pathA.Count;
+            int m = pathB.Count;
+            double[,] dtw = new double[n, m];
+
+            for (int i = 0; i < n; i++)
+            for (int j = 0; j < m; j++)
+                dtw[i, j] = double.PositiveInfinity;
+
+            dtw[0, 0] = Distance(pathA[0], pathB[0]);
+
+            for (int i = 0; i < n; i++)
+            {
+                for (int j = 0; j < m; j++)
+                {
+                    double cost = Distance(pathA[i], pathB[j]);
+                    if (i > 0) dtw[i, j] = Math.Min(dtw[i, j], dtw[i - 1, j] + cost);
+                    if (j > 0) dtw[i, j] = Math.Min(dtw[i, j], dtw[i, j - 1] + cost);
+                    if (i > 0 && j > 0) dtw[i, j] = Math.Min(dtw[i, j], dtw[i - 1, j - 1] + cost);
+                }
+            }
+            return dtw[n - 1, m - 1] / Math.Max(n, m);
+        }
+        /// <summary>
+        /// 核心匹配函数：翻转 + 旋转 + DTW + Hausdorff
+        /// </summary>
+        public double ComparePaths(List<List<PointF>> target, List<List<PointF>> standard)
+        {
+            var targetPoints = FlattenAndResample(target);
+            var standardPoints = FlattenAndResample(standard);
+
+            float[] angles = { -15f, 0f, 15f };
+            var flipOptions = new (bool flipX, bool flipY)[]
+            {
+                (false, false),
+                (true, false),
+                (false, true),
+                (true, true)
+            };
+
+            double bestScore = 0;
+            foreach (var flip in flipOptions)
+            {
+                var flipped = targetPoints.Select(p => new PointF(
+                    flip.flipX ? 1 - p.X : p.X,
+                    flip.flipY ? 1 - p.Y : p.Y
+                )).ToList();
+
+                foreach (var angle in angles)
+                {
+                    var rotated = RotatePath(flipped, angle);
+                    double hausdorff = HausdorffDistance(rotated, standardPoints);
+                    double dtw = DTWDistance(rotated, standardPoints);
+
+                    // 融合相似度：距离越小，相似度越高
+                    double similarity = Math.Exp(-5 * hausdorff) * Math.Exp(-5 * dtw);
+                    if (similarity > bestScore) bestScore = similarity;
+                }
+            }
+            return bestScore;
+        }
+        
+        
+        
         #region 核心算法（Bitmap + IoU）
 
         private double CompareShape(List<List<PointF>> pathA, List<List<PointF>> pathB)
