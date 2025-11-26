@@ -28,11 +28,11 @@ namespace Terry.MagicDuel
         
         private float lineWidth; // 线的粗细
 
-        private List<PointF> currPointList;
+        private List<Vector2> currPointList;
         /// <summary>
         /// 整图的坐标点
         /// </summary>
-        public List<List<PointF>> _picPoints = new  List<List<PointF>>();
+        public List<List<Vector2>> _picPoints = new  List<List<Vector2>>();
 
         public void Init(GameObject _lineParent,Material[] _lineMateria)
         {
@@ -109,7 +109,7 @@ namespace Terry.MagicDuel
                 LineRenderer lineRenderer = currLineObj.GetComponent<LineRenderer>();
                 lineRenderer.materials = lineMateria;
                 lineObjs.Add(currLineObj);
-                currPointList = new List<PointF>();
+                currPointList = new List<Vector2>();
             }
         }
 
@@ -126,7 +126,7 @@ namespace Terry.MagicDuel
             LineRenderer lineRenderer = currLineObj.transform.GetComponent<LineRenderer>();
             lineRenderer.positionCount++;
             lineRenderer.SetPosition(lineRenderer.positionCount - 1, position);
-            currPointList.Add(new PointF(position.x, position.y));
+            currPointList.Add(new Vector2(position.x, position.y));
         }
 
         public void EndPaint()
